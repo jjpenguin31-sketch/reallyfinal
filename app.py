@@ -3,17 +3,17 @@ import streamlit as st
 import streamlit.components.v1 as components
 import zipfile
 import math
+import json
 from pathlib import PurePosixPath
-import matplotlib.pyplot as plt
 
 st.set_page_config(
-    page_title="비행기 날개 양력 시뮬레이터",
+    page_title="비행기 날개 양력 분석",
     page_icon="✈️",
     layout="wide"
 )
 
 st.title("✈️ 비행기 날개 양력 시뮬레이터")
-st.write("날개를 직접 기울여 받음각과 양력의 변화를 확인하세요.")
+st.write("실제 날개 단면을 마우스로 직접 회전시켜 보세요.")
 
 ZIP_PATH = "coord_seligFmt.zip"
 
@@ -38,55 +38,55 @@ def read_airfoil(member):
 
         if len(parts) >= 2:
             try:
-                points.append((float(parts[0]), float(parts[1])))
+                points.append([
+                    float(parts[0]),
+                    float(parts[1])
+                ])
             except ValueError:
-                pass
+                continue
 
     if len(points) < 3:
-        raise ValueError("날개 좌표를 읽을 수 없습니다.")
+        raise ValueError("날개 좌표 데이터가 부족합니다.")
 
-    return points
+    # 날개 중심을 원점으로 이동
+    min_x = min(p[0] for p in points)
+    max_x = max(p[0] for p in points)
+    min_y = min(p[1] for p in points)
+    max_y = max(p[1] for p in points)
+
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+
+    return [
+        [p[0] - center_x, p[1] - center_y]
+        for p in points
+    ]
 
 
 try:
     files = get_airfoil_files()
 except Exception as e:
-    st.error(f"ZIP 파일을 읽을 수 없습니다: {e}")
+    st.error(f"ZIP 파일 오류: {e}")
     st.stop()
 
 if not files:
-    st.error("ZIP 파일 안에 .dat 파일이 없습니다.")
+    st.error("ZIP 파일에 날개 데이터가 없습니다.")
     st.stop()
 
 
-# 날개 단면 선택
-st.header("1. 날개 단면 선택")
+# 날개 선택
+st.header("1. 실제 날개 단면 선택")
 
 selected = st.selectbox(
-    "날개 단면",
+    "날개 모양 선택",
     files,
     format_func=lambda n: PurePosixPath(n).name
 )
 
 try:
     points = read_airfoil(selected)
-
-    fig, ax = plt.subplots(figsize=(9, 3))
-    ax.plot(
-        [p[0] for p in points],
-        [p[1] for p in points]
-    )
-    ax.set_aspect("equal", adjustable="datalim")
-    ax.set_title(PurePosixPath(selected).name)
-    ax.set_xlabel("Chord")
-    ax.set_ylabel("Thickness")
-    ax.grid(True)
-
-    st.pyplot(fig)
-    plt.close(fig)
-
 except Exception as e:
-    st.error(f"날개 데이터를 표시할 수 없습니다: {e}")
+    st.error(str(e))
     st.stop()
 
 
@@ -97,40 +97,50 @@ c1, c2 = st.columns(2)
 
 with c1:
     span = st.number_input(
-        "날개폭 (m)", min_value=0.1, value=10.0
+        "날개폭 (m)",
+        min_value=0.1,
+        value=10.0
     )
+
     chord = st.number_input(
-        "시위 길이 (m)", min_value=0.1, value=1.5
-    )
-    speed = st.number_input(
-        "비행 속도 (m/s)", min_value=0.1, value=50.0
+        "시위 길이 (m)",
+        min_value=0.1,
+        value=1.5
     )
 
 with c2:
+    speed = st.number_input(
+        "비행 속도 (m/s)",
+        min_value=0.1,
+        value=50.0
+    )
+
     density = st.number_input(
         "공기 밀도 (kg/m³)",
         min_value=0.1,
         value=1.225
     )
 
-st.header("3. 날개 직접 기울이기")
+
+# 마우스 회전 시뮬레이터
+st.header("3. 날개 모양 직접 회전")
 
 st.write(
-    "아래 날개의 가운데 부분을 마우스로 누른 뒤 "
-    "위아래로 움직여 보세요."
+    "날개 모양을 마우스로 드래그해 보세요. "
+    "날개 전체가 회전합니다."
 )
 
-# 마우스로 조작하는 시뮬레이터
+points_json = json.dumps(points)
+
 html = """
 <!DOCTYPE html>
 <html>
 <head>
 <style>
 body {
-    font-family: Arial, sans-serif;
     margin: 0;
-    background: #f5f7fa;
-    color: #202124;
+    font-family: Arial;
+    background: #f4f7fb;
 }
 .container {
     padding: 12px;
@@ -138,7 +148,7 @@ body {
 canvas {
     width: 100%;
     background: white;
-    border: 1px solid #d0d7de;
+    border: 1px solid #ccd4df;
     border-radius: 10px;
     touch-action: none;
     cursor: grab;
@@ -147,32 +157,15 @@ canvas:active {
     cursor: grabbing;
 }
 .info {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-top: 12px;
-}
-.card {
-    flex: 1;
-    min-width: 130px;
-    padding: 14px;
     background: white;
+    padding: 13px;
+    margin-top: 10px;
+    border-radius: 8px;
     border: 1px solid #ddd;
-    border-radius: 9px;
 }
 .value {
-    font-size: 23px;
+    font-size: 25px;
     font-weight: bold;
-    margin-top: 6px;
-}
-button {
-    margin-top: 12px;
-    padding: 9px 16px;
-    border: 0;
-    border-radius: 7px;
-    background: #2563eb;
-    color: white;
-    cursor: pointer;
 }
 </style>
 </head>
@@ -180,39 +173,34 @@ button {
 <body>
 <div class="container">
 
-<h3>날개 받음각 조절</h3>
-<canvas id="wing" width="850" height="390"></canvas>
+<h3>선택한 실제 날개 단면</h3>
+<canvas id="canvas" width="900" height="450"></canvas>
 
 <div class="info">
-    <div class="card">
-        받음각
-        <div class="value" id="angle">5°</div>
-    </div>
-    <div class="card">
-        양력 계수 CL
-        <div class="value" id="cl">0.548</div>
-    </div>
-    <div class="card">
-        계산된 양력
-        <div class="value" id="lift">-</div>
-    </div>
+    받음각
+    <div class="value" id="angle">5°</div>
+    양력
+    <div class="value" id="lift">-</div>
+    양력 계수
+    <div class="value" id="cl">-</div>
 </div>
 
-<button onclick="resetWing()">각도 초기화</button>
-
-<p style="font-size:12px;color:#666">
-날개를 드래그하면 각도가 변합니다.
-양력은 교육용 단순 근사 모델로 계산합니다.
-</p>
+<p>마우스로 날개를 드래그해서 각도를 조절하세요.</p>
 
 </div>
 
 <script>
-const canvas = document.getElementById("wing");
+const points = POINTS_DATA;
+
+const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 
 let angle = 5;
 let dragging = false;
+
+const centerX = 450;
+const centerY = 220;
+const scale = 290;
 
 const span = SPAN_VALUE;
 const chord = CHORD_VALUE;
@@ -220,9 +208,15 @@ const speed = SPEED_VALUE;
 const density = DENSITY_VALUE;
 
 const area = span * chord;
-const centerX = 425;
-const centerY = 205;
-const wingLength = 230;
+
+function rotatePoint(p, a) {
+    const rad = a * Math.PI / 180;
+
+    return {
+        x: p[0] * Math.cos(rad) - p[1] * Math.sin(rad),
+        y: p[0] * Math.sin(rad) + p[1] * Math.cos(rad)
+    };
+}
 
 function drawArrow(x1, y1, x2, y2, color, label) {
     ctx.strokeStyle = color;
@@ -234,17 +228,17 @@ function drawArrow(x1, y1, x2, y2, color, label) {
     ctx.lineTo(x2, y2);
     ctx.stroke();
 
-    let a = Math.atan2(y2-y1, x2-x1);
+    const a = Math.atan2(y2-y1, x2-x1);
 
     ctx.beginPath();
     ctx.moveTo(x2, y2);
     ctx.lineTo(
-        x2 - 12*Math.cos(a-0.5),
-        y2 - 12*Math.sin(a-0.5)
+        x2-12*Math.cos(a-0.5),
+        y2-12*Math.sin(a-0.5)
     );
     ctx.lineTo(
-        x2 - 12*Math.cos(a+0.5),
-        y2 - 12*Math.sin(a+0.5)
+        x2-12*Math.cos(a+0.5),
+        y2-12*Math.sin(a+0.5)
     );
     ctx.closePath();
     ctx.fill();
@@ -257,65 +251,79 @@ function update() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     // 공기 흐름
-    for (let y of [75, 115, 155, 255, 295, 335]) {
-        drawArrow(35, y, 160, y, "#60a5fa", "");
-    }
-
-    ctx.fillStyle = "#2563eb";
     ctx.font = "bold 16px Arial";
+    ctx.fillStyle = "#2563eb";
     ctx.fillText("공기 흐름 →", 35, 35);
 
-    // 날개
-    let rad = angle * Math.PI / 180;
-    let dx = Math.cos(rad) * wingLength / 2;
-    let dy = Math.sin(rad) * wingLength / 2;
+    for (let y of [80, 130, 180, 260, 310, 360]) {
+        drawArrow(35, y, 150, y, "#60a5fa", "");
+    }
 
-    let x1 = centerX - dx;
-    let y1 = centerY + dy;
-    let x2 = centerX + dx;
-    let y2 = centerY - dy;
-
-    ctx.lineWidth = 13;
-    ctx.strokeStyle = "#2563eb";
-    ctx.lineCap = "round";
+    // 실제 좌표를 회전시켜 날개 그리기
+    const rotated = points.map(p => rotatePoint(p, angle));
 
     ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
 
-    // 날개 중심
-    ctx.fillStyle = "#1d4ed8";
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, 8, 0, Math.PI*2);
+    rotated.forEach((p, i) => {
+        const x = centerX + p.x * scale;
+        const y = centerY - p.y * scale;
+
+        if (i === 0) {
+            ctx.moveTo(x, y);
+        } else {
+            ctx.lineTo(x, y);
+        }
+    });
+
+    ctx.closePath();
+
+    ctx.fillStyle = "#93c5fd";
     ctx.fill();
 
-    // 받음각 표시
-    ctx.strokeStyle = "#f59e0b";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(centerX, centerY);
-    ctx.lineTo(centerX+100, centerY);
+    ctx.strokeStyle = "#1d4ed8";
+    ctx.lineWidth = 3;
     ctx.stroke();
 
+    // 회전 중심
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, 5, 0, Math.PI*2);
+    ctx.fillStyle = "#1d4ed8";
+    ctx.fill();
+
+    // 기준선
+    ctx.setLineDash([6, 5]);
+    ctx.strokeStyle = "#999";
+    ctx.beginPath();
+    ctx.moveTo(centerX-170, centerY);
+    ctx.lineTo(centerX+170, centerY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 받음각 표시
     ctx.fillStyle = "#d97706";
-    ctx.font = "bold 15px Arial";
-    ctx.fillText("받음각 " + angle.toFixed(1) + "°", 540, 165);
+    ctx.font = "bold 17px Arial";
+    ctx.fillText("받음각: " + angle.toFixed(1) + "°", 650, 100);
 
     // 양력 계산
+    const rad = angle * Math.PI / 180;
+
     let cl = 2 * Math.PI * rad;
     cl = Math.max(-1.2, Math.min(1.2, cl));
 
-    let lift = 0.5 * density * speed * speed * area * cl;
+    const lift =
+        0.5 * density * speed * speed * area * cl;
 
-    // 양력 방향은 공기 흐름에 수직인 위쪽 방향
-    let liftLength = Math.max(-110, Math.min(110, lift / 100));
+    // 양력 화살표
+    const arrowLength = Math.max(
+        -120,
+        Math.min(120, lift / 100)
+    );
 
     drawArrow(
         centerX,
         centerY,
         centerX,
-        centerY - liftLength,
+        centerY-arrowLength,
         "#16a34a",
         "양력"
     );
@@ -332,16 +340,20 @@ function update() {
         }) + " N";
 }
 
-function getPointerAngle(e) {
+// 드래그로 회전
+function pointerAngle(e) {
     const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
 
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
+    const x =
+        (e.clientX - rect.left) * canvas.width / rect.width;
 
-    return Math.atan2(centerY-y, x-centerX)
-        * 180 / Math.PI;
+    const y =
+        (e.clientY - rect.top) * canvas.height / rect.height;
+
+    return Math.atan2(
+        centerY-y,
+        x-centerX
+    ) * 180 / Math.PI;
 }
 
 canvas.addEventListener("pointerdown", e => {
@@ -352,7 +364,11 @@ canvas.addEventListener("pointerdown", e => {
 canvas.addEventListener("pointermove", e => {
     if (!dragging) return;
 
-    angle = Math.max(-5, Math.min(15, getPointerAngle(e)));
+    angle = Math.max(
+        -5,
+        Math.min(15, pointerAngle(e))
+    );
+
     update();
 });
 
@@ -364,11 +380,6 @@ canvas.addEventListener("pointercancel", () => {
     dragging = false;
 });
 
-function resetWing() {
-    angle = 5;
-    update();
-}
-
 update();
 </script>
 </body>
@@ -377,20 +388,17 @@ update();
 
 html = (
     html
+    .replace("POINTS_DATA", points_json)
     .replace("SPAN_VALUE", str(span))
     .replace("CHORD_VALUE", str(chord))
     .replace("SPEED_VALUE", str(speed))
     .replace("DENSITY_VALUE", str(density))
 )
 
-components.html(html, height=650, scrolling=True)
+components.html(html, height=680, scrolling=True)
 
-st.caption(
-    "계산식: L = 1/2 × 공기 밀도 × 속도² × 날개 면적 × 양력 계수"
-)
-
-st.warning(
-    "현재 양력 계수는 얇은 날개 이론을 이용한 단순 근사입니다. "
-    "실제 날개 단면별 공력 특성이나 실속 현상은 반영하지 않습니다."
+st.info(
+    "양력 계산은 얇은 날개 이론을 이용한 교육용 근사입니다. "
+    "실제 날개 단면별 양력 특성과 실속은 아직 반영하지 않습니다."
 )
 
