@@ -1,6 +1,7 @@
 
 import streamlit as st
 import streamlit.components.v1 as components
+import zipfile
 import numpy as np
 import json
 import re
@@ -12,76 +13,86 @@ st.set_page_config(
 )
 
 st.title("✈️ 항공기 날개 양력 분석")
-st.write("직접 날개 파일을 업로드하고 받음각을 조절해 보세요.")
+st.caption("실제 에어포일 선택 · 마우스 회전 · 실시간 양력 분석")
 
-# --------------------------------
-# 1. 날개 파일 업로드
-# --------------------------------
 
-st.sidebar.header("날개 설정")
+# =====================================
+# 1. 기존 ZIP 파일에서 에어포일 불러오기
+# =====================================
 
-uploaded_file = st.sidebar.file_uploader(
-    "날개 좌표 파일 업로드 (.dat 또는 .txt)",
-    type=["dat", "txt"]
+@st.cache_data
+def load_airfoils():
+
+    airfoils = {}
+
+    with zipfile.ZipFile("coord_seligFmt.zip", "r") as z:
+
+        for filename in z.namelist():
+
+            if not filename.lower().endswith(".dat"):
+                continue
+
+            try:
+                content = z.read(filename).decode(
+                    "utf-8",
+                    errors="ignore"
+                )
+
+                points = []
+
+                for line in content.splitlines():
+
+                    numbers = re.findall(
+                        r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?",
+                        line
+                    )
+
+                    if len(numbers) >= 2:
+
+                        x = float(numbers[0])
+                        y = float(numbers[1])
+
+                        if np.isfinite(x) and np.isfinite(y):
+                            points.append([x, y])
+
+                if len(points) >= 10:
+
+                    name = filename.split("/")[-1]
+
+                    # 중복 파일명 방지
+                    if name in airfoils:
+                        name = filename
+
+                    airfoils[name] = points
+
+            except Exception:
+                continue
+
+    return airfoils
+
+
+try:
+    airfoils = load_airfoils()
+
+except FileNotFoundError:
+    st.error("coord_seligFmt.zip 파일을 찾을 수 없습니다.")
+    st.stop()
+
+if not airfoils:
+    st.error("ZIP 파일에서 날개 좌표를 찾지 못했습니다.")
+    st.stop()
+
+
+# =====================================
+# 2. 날개 선택 및 비행 조건
+# =====================================
+
+st.sidebar.header("✈️ 날개 선택")
+
+selected = st.sidebar.selectbox(
+    "사용할 에어포일",
+    list(airfoils.keys())
 )
-
-if uploaded_file is None:
-    st.info(
-        "왼쪽 메뉴에서 에어포일 좌표 파일(.dat)을 업로드하세요."
-    )
-    st.stop()
-
-# --------------------------------
-# 2. 좌표 데이터 읽기
-# --------------------------------
-
-content = uploaded_file.getvalue().decode(
-    "utf-8", errors="ignore"
-)
-
-points = []
-
-for line in content.splitlines():
-
-    nums = re.findall(
-        r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?",
-        line
-    )
-
-    if len(nums) >= 2:
-
-        try:
-            x = float(nums[0])
-            y = float(nums[1])
-
-            if np.isfinite(x) and np.isfinite(y):
-                points.append([x, y])
-
-        except ValueError:
-            continue
-
-if len(points) < 10:
-    st.error("날개 좌표를 읽지 못했습니다. 올바른 DAT 파일인지 확인하세요.")
-    st.stop()
-
-points = np.array(points)
-
-# 좌표 범위 확인
-if np.ptp(points[:, 0]) == 0:
-    st.error("올바른 날개 좌표가 아닙니다.")
-    st.stop()
-
-# 시위 길이 기준으로 정규화
-x_min = points[:, 0].min()
-x_max = points[:, 0].max()
-
-points[:, 0] = (
-    points[:, 0] - x_min
-) / (x_max - x_min)
-
-# --------------------------------
-# 3. 비행 조건
-# --------------------------------
 
 st.sidebar.divider()
 st.sidebar.header("비행 조건")
@@ -106,11 +117,32 @@ density = st.sidebar.slider(
     0.5, 2.0, 1.225
 )
 
-# --------------------------------
-# 4. HTML 데이터 전달
-# --------------------------------
+st.sidebar.caption("선택한 날개: " + selected)
+
+
+# =====================================
+# 3. 좌표 정규화
+# =====================================
+
+points = np.array(airfoils[selected], dtype=float)
+
+x_min = np.min(points[:, 0])
+x_max = np.max(points[:, 0])
+
+if x_max <= x_min:
+    st.error("잘못된 에어포일 좌표입니다.")
+    st.stop()
+
+# 시위 길이를 0~1로 정규화
+points[:, 0] = (
+    points[:, 0] - x_min
+) / (x_max - x_min)
 
 points_json = json.dumps(points.tolist())
+
+# =====================================
+# 4. JavaScript 화면
+# =====================================
 
 html = r"""
 <!DOCTYPE html>
@@ -125,8 +157,8 @@ html = r"""
 }
 
 body {
-    font-family: Arial, sans-serif;
     margin: 0;
+    font-family: Arial, sans-serif;
     color: #222;
 }
 
@@ -139,8 +171,9 @@ body {
 .panel {
     border: 1px solid #ddd;
     border-radius: 12px;
-    padding: 14px;
+    padding: 15px;
     background: white;
+    min-width: 0;
 }
 
 h3 {
@@ -154,15 +187,15 @@ canvas {
     border-radius: 8px;
 }
 
-#wing {
-    height: 400px;
+#wingCanvas {
+    height: 420px;
     cursor: grab;
     touch-action: none;
 }
 
 .graph {
     height: 190px;
-    margin-top: 10px;
+    margin: 10px 0 20px;
 }
 
 .metrics {
@@ -173,7 +206,7 @@ canvas {
 
 .metric {
     background: #f1f5f9;
-    padding: 12px;
+    padding: 13px;
     border-radius: 9px;
 }
 
@@ -184,7 +217,11 @@ canvas {
 .metric strong {
     display: block;
     font-size: 22px;
-    margin-top: 6px;
+    margin-top: 7px;
+}
+
+#liftValue {
+    color: #1675d1;
 }
 
 table {
@@ -195,8 +232,8 @@ table {
 }
 
 td, th {
+    padding: 9px 5px;
     border-bottom: 1px solid #ddd;
-    padding: 8px;
     text-align: center;
 }
 
@@ -219,8 +256,8 @@ button {
 }
 
 .hint {
-    color: #666;
     font-size: 13px;
+    color: #666;
 }
 
 @media(max-width: 750px) {
@@ -236,29 +273,36 @@ button {
 
 <div class="container">
 
+    <!-- 왼쪽: 날개 조작 -->
+
     <div class="panel">
 
-        <h3>✈️ 업로드한 날개 직접 조작</h3>
+        <h3>✈️ 선택한 날개 직접 조작</h3>
 
         <p class="hint">
             날개를 마우스로 위아래로 드래그하세요.
-            위로 움직이면 받음각이 커집니다.
+            위로 움직이면 받음각이 증가합니다.
         </p>
 
-        <canvas id="wing"></canvas>
+        <canvas id="wingCanvas"></canvas>
 
         <h3>
             현재 받음각:
             <span id="angleText">5.0°</span>
         </h3>
 
-        <button onclick="resetAngle()">각도 초기화</button>
+        <button onclick="resetAngle()">
+            각도 초기화
+        </button>
 
     </div>
 
+
+    <!-- 오른쪽: 분석 결과 -->
+
     <div class="panel">
 
-        <h3>📊 실시간 양력 분석</h3>
+        <h3>📊 실시간 분석 결과</h3>
 
         <div class="metrics">
 
@@ -284,26 +328,26 @@ button {
 
         </div>
 
-        <h3 style="margin-top:20px;">
+        <h3 style="margin-top:22px;">
             받음각에 따른 양력
         </h3>
 
         <canvas id="liftGraph" class="graph"></canvas>
 
-        <h3 style="margin-top:20px;">
+        <h3>
             받음각에 따른 양력 계수
         </h3>
 
         <canvas id="clGraph" class="graph"></canvas>
 
-        <h3>계산 결과 표</h3>
+        <h3>📋 계산 결과 표</h3>
 
         <table>
             <thead>
                 <tr>
                     <th>받음각</th>
-                    <th>CL</th>
-                    <th>양력(N)</th>
+                    <th>양력 계수</th>
+                    <th>양력 (N)</th>
                 </tr>
             </thead>
 
@@ -314,7 +358,12 @@ button {
 
 </div>
 
+
 <script>
+
+// =====================================
+// Python에서 전달된 데이터
+// =====================================
 
 const points = __POINTS__;
 
@@ -327,20 +376,26 @@ const area = chord * span;
 
 let angle = 5;
 
-const wing = document.getElementById("wing");
-const wingCtx = wing.getContext("2d");
 
-const liftGraph = document.getElementById("liftGraph");
-const liftCtx = liftGraph.getContext("2d");
+// =====================================
+// 캔버스 설정
+// =====================================
 
-const clGraph = document.getElementById("clGraph");
-const clCtx = clGraph.getContext("2d");
+const wingCanvas = document.getElementById("wingCanvas");
+const wingCtx = wingCanvas.getContext("2d");
 
-// --------------------------------
+const liftCanvas = document.getElementById("liftGraph");
+const liftCtx = liftCanvas.getContext("2d");
+
+const clCanvas = document.getElementById("clGraph");
+const clCtx = clCanvas.getContext("2d");
+
+
+// =====================================
 // 양력 계산
-// --------------------------------
+// =====================================
 
-function getCL(a) {
+function calculateCL(a) {
 
     const rad = a * Math.PI / 180;
 
@@ -351,26 +406,28 @@ function getCL(a) {
 
 }
 
-function getLift(a) {
+function calculateLift(a) {
 
-    return 0.5 * density * speed ** 2 *
-        area * getCL(a);
+    const cl = calculateCL(a);
+
+    return 0.5 * density * speed * speed * area * cl;
 
 }
 
-// --------------------------------
-// 실제 날개 그리기
-// --------------------------------
+
+// =====================================
+// 실제 에어포일 그리기
+// =====================================
 
 function drawWing() {
 
-    const w = wing.clientWidth;
-    const h = wing.clientHeight;
+    const w = wingCanvas.clientWidth;
+    const h = wingCanvas.clientHeight;
 
     const dpr = window.devicePixelRatio || 1;
 
-    wing.width = w * dpr;
-    wing.height = h * dpr;
+    wingCanvas.width = w * dpr;
+    wingCanvas.height = h * dpr;
 
     wingCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
@@ -379,18 +436,20 @@ function drawWing() {
     const cx = w / 2;
     const cy = h / 2;
 
-    const scale = Math.min(w * 0.7, h * 1.5);
+    const scale = Math.min(w * 0.68, h * 1.5);
 
     const rad = angle * Math.PI / 180;
 
-    // 공기 흐름
+
+    // 공기 흐름 화살표
+
     wingCtx.strokeStyle = "#2784d9";
     wingCtx.fillStyle = "#2784d9";
     wingCtx.lineWidth = 2;
 
     for (let i = 0; i < 5; i++) {
 
-        const y = 70 + i * 55;
+        const y = 65 + i * 65;
 
         wingCtx.beginPath();
         wingCtx.moveTo(8, y);
@@ -406,10 +465,14 @@ function drawWing() {
 
     }
 
-    // 선택한 날개 좌표 회전
+
+    // 실제 선택한 에어포일 회전
+
     wingCtx.save();
 
     wingCtx.translate(cx, cy);
+
+    // 앞전이 위로 올라가는 방향을 양의 받음각으로 표시
     wingCtx.rotate(-rad);
 
     wingCtx.beginPath();
@@ -438,16 +501,25 @@ function drawWing() {
 
     wingCtx.restore();
 
-    wingCtx.fillStyle = "red";
+
+    // 회전 중심 표시
+
     wingCtx.beginPath();
     wingCtx.arc(cx, cy, 4, 0, Math.PI * 2);
+
+    wingCtx.fillStyle = "red";
     wingCtx.fill();
+
+    wingCtx.fillStyle = "#333";
+    wingCtx.font = "13px Arial";
+    wingCtx.fillText("회전 중심", cx + 10, cy - 10);
 
 }
 
-// --------------------------------
+
+// =====================================
 // 그래프 그리기
-// --------------------------------
+// =====================================
 
 function drawGraph(canvas, ctx, type) {
 
@@ -460,10 +532,11 @@ function drawGraph(canvas, ctx, type) {
     canvas.height = h * dpr;
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
     ctx.clearRect(0, 0, w, h);
 
     const left = 42;
-    const right = 10;
+    const right = 12;
     const top = 12;
     const bottom = 28;
 
@@ -471,20 +544,31 @@ function drawGraph(canvas, ctx, type) {
     const maxA = 20;
 
     const maxValue = type === "lift"
-        ? Math.max(100, Math.abs(getLift(20)) * 1.15)
+        ? Math.max(100, Math.abs(calculateLift(20)) * 1.15)
         : 1.3;
 
+
     function px(a) {
-        return left + (a - minA) /
-            (maxA - minA) * (w - left - right);
+
+        return left +
+            (a - minA) / (maxA - minA) *
+            (w - left - right);
+
     }
 
     function py(v) {
-        return top + (maxValue - v) /
-            (2 * maxValue) * (h - top - bottom);
+
+        return top +
+            (maxValue - v) / (2 * maxValue) *
+            (h - top - bottom);
+
     }
 
-    ctx.strokeStyle = "#aaa";
+
+    // 축
+
+    ctx.strokeStyle = "#999";
+    ctx.lineWidth = 1;
 
     ctx.beginPath();
     ctx.moveTo(left, top);
@@ -492,10 +576,16 @@ function drawGraph(canvas, ctx, type) {
     ctx.lineTo(w - right, h - bottom);
     ctx.stroke();
 
+
+    // 0 기준선
+
     ctx.beginPath();
     ctx.moveTo(left, py(0));
     ctx.lineTo(w - right, py(0));
     ctx.stroke();
+
+
+    // 그래프 선
 
     ctx.strokeStyle = type === "lift" ? "#1675d1" : "#15966b";
     ctx.lineWidth = 2.5;
@@ -505,8 +595,8 @@ function drawGraph(canvas, ctx, type) {
     for (let a = minA; a <= maxA; a += 0.25) {
 
         const value = type === "lift"
-            ? getLift(a)
-            : getCL(a);
+            ? calculateLift(a)
+            : calculateCL(a);
 
         if (a === minA) {
             ctx.moveTo(px(a), py(value));
@@ -518,15 +608,28 @@ function drawGraph(canvas, ctx, type) {
 
     ctx.stroke();
 
-    const current = type === "lift"
-        ? getLift(angle)
-        : getCL(angle);
 
-    ctx.fillStyle = "#e34b4b";
+    // 현재 받음각 위치
+
+    const current = type === "lift"
+        ? calculateLift(angle)
+        : calculateCL(angle);
 
     ctx.beginPath();
-    ctx.arc(px(angle), py(current), 5, 0, Math.PI * 2);
+
+    ctx.arc(
+        px(angle),
+        py(current),
+        5,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fillStyle = "#e34b4b";
     ctx.fill();
+
+
+    // X축 눈금
 
     ctx.fillStyle = "#555";
     ctx.font = "11px Arial";
@@ -538,9 +641,10 @@ function drawGraph(canvas, ctx, type) {
 
 }
 
-// --------------------------------
+
+// =====================================
 // 결과 표
-// --------------------------------
+// =====================================
 
 function updateTable() {
 
@@ -548,17 +652,17 @@ function updateTable() {
 
     for (let a = -10; a <= 20; a += 5) {
 
-        const cl = getCL(a);
-        const lift = getLift(a);
+        const cl = calculateCL(a);
+        const lift = calculateLift(a);
 
         const active = Math.abs(a - angle) < 2.5;
 
         html += `
-        <tr class="${active ? "active" : ""}">
-            <td>${a}°</td>
-            <td>${cl.toFixed(3)}</td>
-            <td>${lift.toFixed(1)}</td>
-        </tr>
+            <tr class="${active ? "active" : ""}">
+                <td>${a}°</td>
+                <td>${cl.toFixed(3)}</td>
+                <td>${lift.toFixed(1)}</td>
+            </tr>
         `;
 
     }
@@ -567,14 +671,15 @@ function updateTable() {
 
 }
 
-// --------------------------------
-// 전체 화면 업데이트
-// --------------------------------
+
+// =====================================
+// 전체 화면 갱신
+// =====================================
 
 function updateAll() {
 
-    const cl = getCL(angle);
-    const lift = getLift(angle);
+    const cl = calculateCL(angle);
+    const lift = calculateLift(angle);
 
     document.getElementById("angleText").textContent =
         angle.toFixed(1) + "°";
@@ -586,41 +691,46 @@ function updateAll() {
         cl.toFixed(3);
 
     document.getElementById("liftValue").textContent =
-        lift.toFixed(1) + " N";
+        lift.toLocaleString("ko-KR", {
+            maximumFractionDigits: 1
+        }) + " N";
 
     document.getElementById("areaValue").textContent =
         area.toFixed(2) + " m²";
 
     drawWing();
 
-    drawGraph(liftGraph, liftCtx, "lift");
-    drawGraph(clGraph, clCtx, "cl");
+    drawGraph(liftCanvas, liftCtx, "lift");
+    drawGraph(clCanvas, clCtx, "cl");
 
     updateTable();
 
 }
 
-// --------------------------------
-// 마우스 드래그
-// --------------------------------
+
+// =====================================
+// 마우스로 실제 날개 기울이기
+// =====================================
 
 let dragging = false;
 let startY = 0;
 let startAngle = 0;
 
-wing.addEventListener("pointerdown", (e) => {
+wingCanvas.addEventListener("pointerdown", (e) => {
 
     dragging = true;
 
     startY = e.clientY;
     startAngle = angle;
 
-    wing.setPointerCapture(e.pointerId);
-    wing.style.cursor = "grabbing";
+    wingCanvas.setPointerCapture(e.pointerId);
+
+    wingCanvas.style.cursor = "grabbing";
 
 });
 
-wing.addEventListener("pointermove", (e) => {
+
+wingCanvas.addEventListener("pointermove", (e) => {
 
     if (!dragging) return;
 
@@ -635,19 +745,26 @@ wing.addEventListener("pointermove", (e) => {
 
 });
 
-wing.addEventListener("pointerup", () => {
+
+wingCanvas.addEventListener("pointerup", () => {
 
     dragging = false;
-    wing.style.cursor = "grab";
+    wingCanvas.style.cursor = "grab";
 
 });
 
-wing.addEventListener("pointercancel", () => {
+
+wingCanvas.addEventListener("pointercancel", () => {
 
     dragging = false;
-    wing.style.cursor = "grab";
+    wingCanvas.style.cursor = "grab";
 
 });
+
+
+// =====================================
+// 각도 초기화
+// =====================================
 
 function resetAngle() {
 
@@ -655,6 +772,7 @@ function resetAngle() {
     updateAll();
 
 }
+
 
 window.addEventListener("resize", updateAll);
 
@@ -666,9 +784,9 @@ updateAll();
 </html>
 """
 
-# --------------------------------
-# 5. 입력값 전달
-# --------------------------------
+# =====================================
+# 5. Python 값 전달
+# =====================================
 
 html = html.replace("__POINTS__", points_json)
 html = html.replace("__SPEED__", str(speed))
@@ -685,7 +803,8 @@ components.html(
 st.divider()
 
 st.info(
-    "양력은 CL = 2π α를 사용하는 교육용 근사 모델입니다. "
-    "실제 에어포일의 실험 양력 계수나 실속 현상까지 "
-    "계산하는 CFD 프로그램은 아닙니다."
+    "양력 계산은 얇은 에어포일 이론(CL = 2π α)을 이용한 "
+    "교육용 근사 모델입니다. 실제 날개별 공력 특성, "
+    "실속 및 레이놀즈 수 효과는 반영하지 않습니다."
 )
+
