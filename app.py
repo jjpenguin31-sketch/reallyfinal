@@ -1,10 +1,11 @@
 
 import streamlit as st
-import streamlit.components.v1 as components
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
 import zipfile
-import math
-import json
-from pathlib import PurePosixPath
+import io
+import re
 
 st.set_page_config(
     page_title="비행기 날개 양력 분석",
@@ -12,393 +13,303 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("✈️ 비행기 날개 양력 시뮬레이터")
-st.write("실제 날개 단면을 마우스로 직접 회전시켜 보세요.")
+st.title("✈️ 비행기 날개 양력 분석 프로그램")
+st.caption("에어포일 선택 · 받음각 조절 · 양력 시각화")
 
-ZIP_PATH = "coord_seligFmt.zip"
-
+# -----------------------------
+# 1. 에어포일 데이터 불러오기
+# -----------------------------
 
 @st.cache_data
-def get_airfoil_files():
-    with zipfile.ZipFile(ZIP_PATH, "r") as z:
-        return [
-            n for n in z.namelist()
-            if n.lower().endswith(".dat") and not n.endswith("/")
-        ]
+def load_airfoils():
+    airfoils = {}
+
+    try:
+        with zipfile.ZipFile("coord_seligFmt.zip", "r") as z:
+            for filename in z.namelist():
+
+                if not filename.lower().endswith(".dat"):
+                    continue
+
+                try:
+                    content = z.read(filename).decode(
+                        "utf-8", errors="ignore"
+                    )
+
+                    points = []
+
+                    for line in content.splitlines():
+                        numbers = re.findall(
+                            r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?",
+                            line
+                        )
+
+                        if len(numbers) >= 2:
+                            x = float(numbers[0])
+                            y = float(numbers[1])
+
+                            if np.isfinite(x) and np.isfinite(y):
+                                points.append([x, y])
+
+                    if len(points) >= 10:
+                        name = filename.split("/")[-1]
+                        airfoils[name] = np.array(points)
+
+                except Exception:
+                    continue
+
+    except FileNotFoundError:
+        st.error("coord_seligFmt.zip 파일을 찾을 수 없습니다.")
+
+    return airfoils
 
 
-def read_airfoil(member):
-    with zipfile.ZipFile(ZIP_PATH, "r") as z:
-        content = z.read(member).decode("utf-8", errors="ignore")
+airfoils = load_airfoils()
 
-    points = []
-
-    for line in content.splitlines():
-        parts = line.replace(",", " ").split()
-
-        if len(parts) >= 2:
-            try:
-                points.append([
-                    float(parts[0]),
-                    float(parts[1])
-                ])
-            except ValueError:
-                continue
-
-    if len(points) < 3:
-        raise ValueError("날개 좌표 데이터가 부족합니다.")
-
-    # 날개 중심을 원점으로 이동
-    min_x = min(p[0] for p in points)
-    max_x = max(p[0] for p in points)
-    min_y = min(p[1] for p in points)
-    max_y = max(p[1] for p in points)
-
-    center_x = (min_x + max_x) / 2
-    center_y = (min_y + max_y) / 2
-
-    return [
-        [p[0] - center_x, p[1] - center_y]
-        for p in points
-    ]
-
-
-try:
-    files = get_airfoil_files()
-except Exception as e:
-    st.error(f"ZIP 파일 오류: {e}")
+if not airfoils:
+    st.error(
+        "에어포일 데이터를 불러오지 못했습니다. "
+        "coord_seligFmt.zip 파일이 app.py와 같은 폴더에 있는지 확인하세요."
+    )
     st.stop()
 
-if not files:
-    st.error("ZIP 파일에 날개 데이터가 없습니다.")
-    st.stop()
+# -----------------------------
+# 2. 입력 화면
+# -----------------------------
 
+st.sidebar.header("비행 조건 설정")
 
-# 날개 선택
-st.header("1. 실제 날개 단면 선택")
-
-selected = st.selectbox(
+selected = st.sidebar.selectbox(
     "날개 모양 선택",
-    files,
-    format_func=lambda n: PurePosixPath(n).name
+    list(airfoils.keys())
 )
 
-try:
-    points = read_airfoil(selected)
-except Exception as e:
-    st.error(str(e))
-    st.stop()
-
-
-# 비행 조건
-st.header("2. 비행 조건")
-
-c1, c2 = st.columns(2)
-
-with c1:
-    span = st.number_input(
-        "날개폭 (m)",
-        min_value=0.1,
-        value=10.0
-    )
-
-    chord = st.number_input(
-        "시위 길이 (m)",
-        min_value=0.1,
-        value=1.5
-    )
-
-with c2:
-    speed = st.number_input(
-        "비행 속도 (m/s)",
-        min_value=0.1,
-        value=50.0
-    )
-
-    density = st.number_input(
-        "공기 밀도 (kg/m³)",
-        min_value=0.1,
-        value=1.225
-    )
-
-
-# 마우스 회전 시뮬레이터
-st.header("3. 날개 모양 직접 회전")
-
-st.write(
-    "날개 모양을 마우스로 드래그해 보세요. "
-    "날개 전체가 회전합니다."
+angle = st.sidebar.slider(
+    "받음각 (°)",
+    min_value=-10.0,
+    max_value=20.0,
+    value=5.0,
+    step=0.5
 )
 
-points_json = json.dumps(points)
-
-html = """
-<!DOCTYPE html>
-<html>
-<head>
-<style>
-body {
-    margin: 0;
-    font-family: Arial;
-    background: #f4f7fb;
-}
-.container {
-    padding: 12px;
-}
-canvas {
-    width: 100%;
-    background: white;
-    border: 1px solid #ccd4df;
-    border-radius: 10px;
-    touch-action: none;
-    cursor: grab;
-}
-canvas:active {
-    cursor: grabbing;
-}
-.info {
-    background: white;
-    padding: 13px;
-    margin-top: 10px;
-    border-radius: 8px;
-    border: 1px solid #ddd;
-}
-.value {
-    font-size: 25px;
-    font-weight: bold;
-}
-</style>
-</head>
-
-<body>
-<div class="container">
-
-<h3>선택한 실제 날개 단면</h3>
-<canvas id="canvas" width="900" height="450"></canvas>
-
-<div class="info">
-    받음각
-    <div class="value" id="angle">5°</div>
-    양력
-    <div class="value" id="lift">-</div>
-    양력 계수
-    <div class="value" id="cl">-</div>
-</div>
-
-<p>마우스로 날개를 드래그해서 각도를 조절하세요.</p>
-
-</div>
-
-<script>
-const points = POINTS_DATA;
-
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
-
-let angle = 5;
-let dragging = false;
-
-const centerX = 450;
-const centerY = 220;
-const scale = 290;
-
-const span = SPAN_VALUE;
-const chord = CHORD_VALUE;
-const speed = SPEED_VALUE;
-const density = DENSITY_VALUE;
-
-const area = span * chord;
-
-function rotatePoint(p, a) {
-    const rad = a * Math.PI / 180;
-
-    return {
-        x: p[0] * Math.cos(rad) - p[1] * Math.sin(rad),
-        y: p[0] * Math.sin(rad) + p[1] * Math.cos(rad)
-    };
-}
-
-function drawArrow(x1, y1, x2, y2, color, label) {
-    ctx.strokeStyle = color;
-    ctx.fillStyle = color;
-    ctx.lineWidth = 3;
-
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
-
-    const a = Math.atan2(y2-y1, x2-x1);
-
-    ctx.beginPath();
-    ctx.moveTo(x2, y2);
-    ctx.lineTo(
-        x2-12*Math.cos(a-0.5),
-        y2-12*Math.sin(a-0.5)
-    );
-    ctx.lineTo(
-        x2-12*Math.cos(a+0.5),
-        y2-12*Math.sin(a+0.5)
-    );
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.font = "bold 15px Arial";
-    ctx.fillText(label, x2+8, y2-8);
-}
-
-function update() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // 공기 흐름
-    ctx.font = "bold 16px Arial";
-    ctx.fillStyle = "#2563eb";
-    ctx.fillText("공기 흐름 →", 35, 35);
-
-    for (let y of [80, 130, 180, 260, 310, 360]) {
-        drawArrow(35, y, 150, y, "#60a5fa", "");
-    }
-
-    // 실제 좌표를 회전시켜 날개 그리기
-    const rotated = points.map(p => rotatePoint(p, angle));
-
-    ctx.beginPath();
-
-    rotated.forEach((p, i) => {
-        const x = centerX + p.x * scale;
-        const y = centerY - p.y * scale;
-
-        if (i === 0) {
-            ctx.moveTo(x, y);
-        } else {
-            ctx.lineTo(x, y);
-        }
-    });
-
-    ctx.closePath();
-
-    ctx.fillStyle = "#93c5fd";
-    ctx.fill();
-
-    ctx.strokeStyle = "#1d4ed8";
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    // 회전 중심
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, 5, 0, Math.PI*2);
-    ctx.fillStyle = "#1d4ed8";
-    ctx.fill();
-
-    // 기준선
-    ctx.setLineDash([6, 5]);
-    ctx.strokeStyle = "#999";
-    ctx.beginPath();
-    ctx.moveTo(centerX-170, centerY);
-    ctx.lineTo(centerX+170, centerY);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // 받음각 표시
-    ctx.fillStyle = "#d97706";
-    ctx.font = "bold 17px Arial";
-    ctx.fillText("받음각: " + angle.toFixed(1) + "°", 650, 100);
-
-    // 양력 계산
-    const rad = angle * Math.PI / 180;
-
-    let cl = 2 * Math.PI * rad;
-    cl = Math.max(-1.2, Math.min(1.2, cl));
-
-    const lift =
-        0.5 * density * speed * speed * area * cl;
-
-    // 양력 화살표
-    const arrowLength = Math.max(
-        -120,
-        Math.min(120, lift / 100)
-    );
-
-    drawArrow(
-        centerX,
-        centerY,
-        centerX,
-        centerY-arrowLength,
-        "#16a34a",
-        "양력"
-    );
-
-    document.getElementById("angle").textContent =
-        angle.toFixed(1) + "°";
-
-    document.getElementById("cl").textContent =
-        cl.toFixed(3);
-
-    document.getElementById("lift").textContent =
-        lift.toLocaleString("ko-KR", {
-            maximumFractionDigits: 1
-        }) + " N";
-}
-
-// 드래그로 회전
-function pointerAngle(e) {
-    const rect = canvas.getBoundingClientRect();
-
-    const x =
-        (e.clientX - rect.left) * canvas.width / rect.width;
-
-    const y =
-        (e.clientY - rect.top) * canvas.height / rect.height;
-
-    return Math.atan2(
-        centerY-y,
-        x-centerX
-    ) * 180 / Math.PI;
-}
-
-canvas.addEventListener("pointerdown", e => {
-    dragging = true;
-    canvas.setPointerCapture(e.pointerId);
-});
-
-canvas.addEventListener("pointermove", e => {
-    if (!dragging) return;
-
-    angle = Math.max(
-        -5,
-        Math.min(15, pointerAngle(e))
-    );
-
-    update();
-});
-
-canvas.addEventListener("pointerup", () => {
-    dragging = false;
-});
-
-canvas.addEventListener("pointercancel", () => {
-    dragging = false;
-});
-
-update();
-</script>
-</body>
-</html>
-"""
-
-html = (
-    html
-    .replace("POINTS_DATA", points_json)
-    .replace("SPAN_VALUE", str(span))
-    .replace("CHORD_VALUE", str(chord))
-    .replace("SPEED_VALUE", str(speed))
-    .replace("DENSITY_VALUE", str(density))
+speed = st.sidebar.slider(
+    "비행 속도 (m/s)",
+    10, 150, 50
 )
 
-components.html(html, height=680, scrolling=True)
+chord = st.sidebar.slider(
+    "날개 시위 길이 (m)",
+    0.1, 5.0, 1.0
+)
+
+span = st.sidebar.slider(
+    "날개 폭 (m)",
+    1.0, 30.0, 10.0
+)
+
+density = st.sidebar.slider(
+    "공기 밀도 (kg/m³)",
+    0.5, 2.0, 1.225
+)
+
+# -----------------------------
+# 3. 양력 계산
+# -----------------------------
+
+# 얇은 에어포일 이론을 이용한 교육용 근사 모델
+alpha_rad = np.radians(angle)
+
+cl = 2 * np.pi * alpha_rad
+cl = np.clip(cl, -1.2, 1.2)
+
+area = chord * span
+
+lift = 0.5 * density * speed**2 * area * cl
+
+# -----------------------------
+# 4. 왼쪽 날개 / 오른쪽 분석
+# -----------------------------
+
+left, right = st.columns([1.15, 1])
+
+with left:
+    st.subheader("날개 모양 및 받음각")
+
+    points = airfoils[selected].copy()
+
+    # 날개 회전 중심을 25% 시위 위치로 설정
+    pivot_x = 0.25
+    pivot_y = 0.0
+
+    theta = np.radians(angle)
+
+    x = points[:, 0] - pivot_x
+    y = points[:, 1] - pivot_y
+
+    rotated_x = x * np.cos(theta) - y * np.sin(theta)
+    rotated_y = x * np.sin(theta) + y * np.cos(theta)
+
+    rotated_x += pivot_x
+    rotated_y += pivot_y
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    ax.plot(
+        rotated_x,
+        rotated_y,
+        linewidth=2,
+        label="Airfoil"
+    )
+
+    # 공기 흐름 화살표
+    for yy in np.linspace(-0.15, 0.15, 5):
+        ax.arrow(
+            -0.3, yy,
+            0.25, 0,
+            head_width=0.012,
+            head_length=0.025,
+            color="blue",
+            length_includes_head=True
+        )
+
+    ax.set_title(f"{selected} | Angle of Attack: {angle}°")
+    ax.set_xlabel("Chord")
+    ax.set_ylabel("Thickness")
+    ax.grid(True)
+    ax.axis("equal")
+
+    st.pyplot(fig)
+    plt.close(fig)
+
+with right:
+    st.subheader("실시간 분석 결과")
+
+    c1, c2 = st.columns(2)
+
+    c1.metric("받음각", f"{angle:.1f}°")
+    c2.metric("양력 계수 CL", f"{cl:.3f}")
+
+    st.metric("계산된 양력", f"{lift:,.2f} N")
+
+    st.metric("날개 면적", f"{area:.2f} m²")
+
+    st.metric("비행 속도", f"{speed} m/s")
+
+# -----------------------------
+# 5. 받음각에 따른 양력 그래프
+# -----------------------------
+
+st.divider()
+st.subheader("📈 받음각에 따른 양력 변화")
+
+angles = np.arange(-10, 20.5, 0.5)
+angles_rad = np.radians(angles)
+
+cls = np.clip(2 * np.pi * angles_rad, -1.2, 1.2)
+
+lifts = (
+    0.5 * density * speed**2 * area * cls
+)
+
+angle_data = pd.DataFrame({
+    "받음각 (°)": angles,
+    "양력 계수 CL": cls,
+    "양력 (N)": lifts
+})
+
+fig2, ax2 = plt.subplots(figsize=(10, 4))
+
+ax2.plot(
+    angles,
+    lifts,
+    linewidth=2,
+    label="Lift"
+)
+
+ax2.axvline(
+    angle,
+    linestyle="--",
+    label=f"Current angle: {angle}°"
+)
+
+ax2.scatter([angle], [lift], s=60)
+
+ax2.set_xlabel("Angle of Attack (°)")
+ax2.set_ylabel("Lift (N)")
+ax2.set_title("Angle of Attack vs Lift")
+ax2.grid(True)
+ax2.legend()
+
+st.pyplot(fig2)
+plt.close(fig2)
+
+# -----------------------------
+# 6. 양력 계수 그래프
+# -----------------------------
+
+st.subheader("📊 받음각에 따른 양력 계수")
+
+fig3, ax3 = plt.subplots(figsize=(10, 4))
+
+ax3.plot(angles, cls, linewidth=2)
+ax3.axvline(angle, linestyle="--", label=f"{angle}°")
+ax3.scatter([angle], [cl], s=60)
+
+ax3.set_xlabel("Angle of Attack (°)")
+ax3.set_ylabel("Lift Coefficient (CL)")
+ax3.set_title("Angle of Attack vs Lift Coefficient")
+ax3.grid(True)
+ax3.legend()
+
+st.pyplot(fig3)
+plt.close(fig3)
+
+# -----------------------------
+# 7. 계산 결과 표
+# -----------------------------
+
+st.subheader("📋 받음각별 계산 결과 표")
+
+st.dataframe(
+    angle_data.round(3),
+    use_container_width=True,
+    hide_index=True
+)
+
+# -----------------------------
+# 8. 속도에 따른 양력 그래프
+# -----------------------------
+
+st.subheader("🚀 비행 속도에 따른 양력 변화")
+
+speeds = np.arange(10, 151, 5)
+
+speed_lifts = (
+    0.5 * density * speeds**2 * area * cl
+)
+
+fig4, ax4 = plt.subplots(figsize=(10, 4))
+
+ax4.plot(speeds, speed_lifts, linewidth=2)
+ax4.scatter([speed], [lift], s=60)
+
+ax4.set_xlabel("Speed (m/s)")
+ax4.set_ylabel("Lift (N)")
+ax4.set_title("Speed vs Lift")
+ax4.grid(True)
+
+st.pyplot(fig4)
+plt.close(fig4)
+
+# -----------------------------
+# 9. 안내
+# -----------------------------
+
+st.divider()
 
 st.info(
-    "양력 계산은 얇은 날개 이론을 이용한 교육용 근사입니다. "
-    "실제 날개 단면별 양력 특성과 실속은 아직 반영하지 않습니다."
+    "이 프로그램은 얇은 에어포일 이론(CL = 2π α)을 "
+    "이용한 교육용 근사 계산 프로그램입니다. "
+    "실제 에어포일별 공력 특성, 실속, 레이놀즈 수 및 "
+    "점성 효과는 반영하지 않습니다."
 )
-
